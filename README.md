@@ -9,4 +9,4 @@ Note: the rings are a bit hard to see, so it may be a good idea to zoom in a bit
 
 When you are finished, you can download by pressing "d" on the keyboard.
 
-This program was "vibe-coded" with Gemini CLI and OpenAO Codex. 
+This program was "vibe-coded" with Gemini CLI and OpenAI Codex. 
