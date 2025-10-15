@@ -86,6 +86,21 @@
             color: #1a4d8f;
         }
 
+        .overlay-content .checkbox-label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-weight: 500;
+            font-size: 0.9rem;
+            color: #333;
+            cursor: pointer;
+        }
+
+        .overlay-content .checkbox-label input[type="checkbox"] {
+            width: 16px;
+            height: 16px;
+        }
+
     </style>
 </head>
 <body>
@@ -101,6 +116,16 @@
             <label for="trackFile">Track File (TCX or GPX)</label>
             <input type="file" id="trackFile" accept=".tcx,.gpx,application/vnd.garmin.tcx+xml,application/gpx+xml">
 
+            <label class="checkbox-label">
+                <input type="checkbox" id="wideTrackToggle">
+                Wide track (6x)
+            </label>
+
+            <label class="checkbox-label">
+                <input type="checkbox" id="kmMarksToggle">
+                Show km marks
+            </label>
+
             <div id="status" aria-live="polite" style="display:none;"></div>
         </div>
     </div>
@@ -115,6 +140,8 @@
         const ctx = canvas.getContext('2d');
         const statusEl = document.getElementById('status');
         const overlayEl = document.getElementById('fileOverlay');
+        const wideTrackToggle = document.getElementById('wideTrackToggle');
+        const kmMarksToggle = document.getElementById('kmMarksToggle');
         const globalAnchorListEl = null;
 
 
@@ -144,6 +171,10 @@
 
         let appearance = { trackColor: '#FF00FF', trackWidth: 2, controlColor: '#FF0000', controlColorGlobal: '#00AAFF', controlColorInitial: '#00FFFF', controlRadius: 16, controlColorCustom: '#0000FF' };
         let customControlIdCounter = 0;
+        let showWideTrack = false;
+        let showKmMarks = false;
+        let kmMarkers = [];
+        let totalTrackLengthKm = 0;
 
         // --- Initialization ---
         function init() {
@@ -158,6 +189,21 @@
 
             window.addEventListener('resize', handleWindowResize);
             window.addEventListener('keydown', handleKeyDown);
+
+            if (wideTrackToggle) {
+                wideTrackToggle.addEventListener('change', () => {
+                    showWideTrack = wideTrackToggle.checked;
+                    redrawCanvas();
+                });
+                showWideTrack = wideTrackToggle.checked;
+            }
+            if (kmMarksToggle) {
+                kmMarksToggle.addEventListener('change', () => {
+                    showKmMarks = kmMarksToggle.checked;
+                    redrawCanvas();
+                });
+                showKmMarks = kmMarksToggle.checked;
+            }
 
             updateStatus('Load map and TCX file.');
             resizeCanvasToViewport();
@@ -237,6 +283,8 @@
             displayTrackScreenPoints = [];
             activeGlobalTransform = null;
             globalAnchorPairs = [];
+            kmMarkers = [];
+            totalTrackLengthKm = 0;
             currentMode = 'idle';
             updateGlobalAnchorListUI();
             
@@ -279,6 +327,8 @@
                     controls = []; 
                     activeGlobalTransform = null; 
                     globalAnchorPairs = [];
+                    kmMarkers = [];
+                    totalTrackLengthKm = 0;
                     updateGlobalAnchorListUI();
 
                     const xmlDoc = new DOMParser().parseFromString(e.target.result, "application/xml");
@@ -304,6 +354,7 @@
                         lon: pt.lon,
                         originalIndex: index
                     }));
+                    annotateOriginalTrackPointsWithDistance();
 
                     if (originalTrackPoints.length > 0) {
                         controls.push(createControl('control-track-start',
@@ -410,6 +461,32 @@
                 lonCorrectionFactor,
                 widthDegCorrected
             };
+        }
+        function haversineDistanceMeters(lat1, lon1, lat2, lon2) {
+            const toRad = Math.PI / 180;
+            const dLat = (lat2 - lat1) * toRad;
+            const dLon = (lon2 - lon1) * toRad;
+            const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                      Math.cos(lat1 * toRad) * Math.cos(lat2 * toRad) *
+                      Math.sin(dLon / 2) * Math.sin(dLon / 2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+            const earthRadiusMeters = 6371000;
+            return earthRadiusMeters * c;
+        }
+        function annotateOriginalTrackPointsWithDistance() {
+            kmMarkers = [];
+            totalTrackLengthKm = 0;
+            if (!originalTrackPoints.length) return;
+            originalTrackPoints[0].cumDistKm = 0;
+            let cumulativeMeters = 0;
+            for (let i = 1; i < originalTrackPoints.length; i++) {
+                const prev = originalTrackPoints[i - 1];
+                const curr = originalTrackPoints[i];
+                const segmentMeters = haversineDistanceMeters(prev.lat, prev.lon, curr.lat, curr.lon);
+                cumulativeMeters += isFinite(segmentMeters) ? segmentMeters : 0;
+                curr.cumDistKm = cumulativeMeters / 1000;
+            }
+            totalTrackLengthKm = cumulativeMeters / 1000;
         }
         function findNearestTrackPointIndex(lat, lon, trackPoints) {
             let nearestIndex = -1;
@@ -954,7 +1031,56 @@
                     return Math.abs(point.x - prev.x) > 0.1 || Math.abs(point.y - prev.y) > 0.1 || Math.abs(point.modelIndex - prev.modelIndex) > 1e-6;
                 });
             }
+            recomputeKmMarkers();
             updateButtonStates();
+        }
+
+        function recomputeKmMarkers() {
+            kmMarkers = [];
+            if (!originalTrackPoints.length || displayTrackScreenPoints.length === 0) return;
+
+            const maxMarker = Math.floor(totalTrackLengthKm);
+            if (maxMarker < 1) return;
+
+            const indexToPoint = new Map();
+            displayTrackScreenPoints.forEach(pt => {
+                indexToPoint.set(pt.modelIndex, { x: pt.x, y: pt.y });
+            });
+
+            let searchIndex = 0;
+            for (let marker = 1; marker <= maxMarker; marker++) {
+                while (searchIndex < originalTrackPoints.length && (originalTrackPoints[searchIndex].cumDistKm ?? 0) < marker) {
+                    searchIndex++;
+                }
+                if (searchIndex >= originalTrackPoints.length) break;
+
+                const currentPoint = originalTrackPoints[searchIndex];
+                if (Math.abs((currentPoint.cumDistKm ?? 0) - marker) < 1e-6) {
+                    const exact = indexToPoint.get(currentPoint.originalIndex);
+                    if (exact) {
+                        kmMarkers.push({ x: exact.x, y: exact.y, label: marker });
+                    }
+                    continue;
+                }
+
+                const nextPoint = currentPoint;
+                const prevIndex = searchIndex - 1;
+                if (prevIndex < 0) continue;
+                const prevPoint = originalTrackPoints[prevIndex];
+                const prevMap = indexToPoint.get(prevPoint.originalIndex);
+                const nextMap = indexToPoint.get(nextPoint.originalIndex);
+                if (!prevMap || !nextMap) continue;
+
+                const prevCum = prevPoint.cumDistKm ?? 0;
+                const nextCum = nextPoint.cumDistKm ?? prevCum;
+                const span = nextCum - prevCum;
+                if (span <= 0) continue;
+
+                const t = (marker - prevCum) / span;
+                const x = prevMap.x + (nextMap.x - prevMap.x) * t;
+                const y = prevMap.y + (nextMap.y - prevMap.y) * t;
+                kmMarkers.push({ x, y, label: marker });
+            }
         }
 
         function redrawCanvas() {
@@ -997,12 +1123,37 @@
 
             if (displayTrackScreenPoints.length > 1) {
                 ctx.beginPath(); ctx.strokeStyle = appearance.trackColor;
-                ctx.lineWidth = appearance.trackWidth / viewTransform.scale;
+                const trackWidth = (showWideTrack ? appearance.trackWidth * 6 : appearance.trackWidth) / viewTransform.scale;
+                ctx.lineWidth = trackWidth;
+                const prevAlpha = ctx.globalAlpha;
+                ctx.globalAlpha = showWideTrack ? 0.4 : prevAlpha;
                 ctx.moveTo(displayTrackScreenPoints[0].x, displayTrackScreenPoints[0].y);
                 for (let i = 1; i < displayTrackScreenPoints.length; i++) {
                     ctx.lineTo(displayTrackScreenPoints[i].x, displayTrackScreenPoints[i].y);
                 }
                 ctx.stroke();
+                ctx.globalAlpha = prevAlpha;
+            }
+            if (showKmMarks && kmMarkers.length > 0) {
+                const markerRadius = 12 / viewTransform.scale;
+                const strokeWidth = 2 / viewTransform.scale;
+                const fontSize = 12 / viewTransform.scale;
+                ctx.save();
+                ctx.font = `${fontSize}px sans-serif`;
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                kmMarkers.forEach(marker => {
+                    ctx.beginPath();
+                    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+                    ctx.strokeStyle = '#000';
+                    ctx.lineWidth = strokeWidth;
+                    ctx.arc(marker.x, marker.y, markerRadius, 0, 2 * Math.PI);
+                    ctx.fill();
+                    ctx.stroke();
+                    ctx.fillStyle = '#000';
+                    ctx.fillText(marker.label.toString(), marker.x, marker.y);
+                });
+                ctx.restore();
             }
             controls.forEach(c => {
                 ctx.beginPath();
@@ -1086,12 +1237,37 @@
                 if (displayTrackScreenPoints.length > 1) {
                     ctxVar.beginPath();
                     ctxVar.strokeStyle = appearance.trackColor;
-                    ctxVar.lineWidth = appearance.trackWidth;
+                    const exportTrackWidth = showWideTrack ? appearance.trackWidth * 6 : appearance.trackWidth;
+                    ctxVar.lineWidth = exportTrackWidth;
+                    const prevAlphaVar = ctxVar.globalAlpha;
+                    ctxVar.globalAlpha = showWideTrack ? 0.4 : prevAlphaVar;
                     ctxVar.moveTo(displayTrackScreenPoints[0].x, displayTrackScreenPoints[0].y);
                     for (let i = 1; i < displayTrackScreenPoints.length; i++) {
                         ctxVar.lineTo(displayTrackScreenPoints[i].x, displayTrackScreenPoints[i].y);
                     }
                     ctxVar.stroke();
+                    ctxVar.globalAlpha = prevAlphaVar;
+                }
+                if (showKmMarks && kmMarkers.length > 0) {
+                    const markerRadius = 12;
+                    const strokeWidth = 2;
+                    const fontSize = 16;
+                    ctxVar.save();
+                    ctxVar.font = `${fontSize}px sans-serif`;
+                    ctxVar.textAlign = 'center';
+                    ctxVar.textBaseline = 'middle';
+                    kmMarkers.forEach(marker => {
+                        ctxVar.beginPath();
+                        ctxVar.fillStyle = 'rgba(255,255,255,0.85)';
+                        ctxVar.strokeStyle = '#000';
+                        ctxVar.lineWidth = strokeWidth;
+                        ctxVar.arc(marker.x, marker.y, markerRadius, 0, 2 * Math.PI);
+                        ctxVar.fill();
+                        ctxVar.stroke();
+                        ctxVar.fillStyle = '#000';
+                        ctxVar.fillText(marker.label.toString(), marker.x, marker.y);
+                    });
+                    ctxVar.restore();
                 }
 
                 if (drawControls) {
